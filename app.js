@@ -71,83 +71,102 @@ function computeStage(Larm, baseLen, topLen, alphaDeg, preset){
   const cons = constraintsFromPreset(preset);
   const warnings = [...stageWarnings(cons)];
 
-  // Rail endpoints (rigid, centered in X)
+  // Rigid rails (centered at x=0)
   const baseLeft  = -baseLen/2;
   const baseRight =  baseLen/2;
   const topLeft   = -topLen/2;
   const topRight  =  topLen/2;
 
-  // Default platform X = 0 in lockX mode.
-  // (If you ever later want drift allowed, you can reintroduce xPlat solving.)
-  const xPlat = 0;
+  // Helper for warnings
+  function outOfRange(name, x, lo, hi){
+    if(x < lo || x > hi){
+      warnings.push(`${name} is outside its rail/slot range (${fmt(x)} mm not in [${fmt(lo)}, ${fmt(hi)}]).`);
+      return true;
+    }
+    return false;
+  }
 
-  // --- Vertical-only mode (rails don't translate in X) ---
+  // --- NEW: Vertical-only scissor kinematics ---
+  // The physically-real 1DOF scissor uses:
+  //   - One fixed pin + one slider per platform (per stage)
+  //   - Each arm has exactly ONE fixed end and ONE sliding end
+  //
+  // Arms:
+  //   Arm1: A (base)  -> D (top)
+  //   Arm2: B (base)  -> C (top)
+  //
+  // Length constraint for either arm:
+  //   (dx)^2 + h^2 = L^2  ->  |dx| = s
+  //
+  // If lockX is enabled, the rails DO NOT translate in X.
   if(state.lockX){
-    // Build a "true X" scissor with symmetric slider pins.
-    // Base pins:
-    //   A and B are on base rail y=0
-    // Top pins:
-    //   C and D are on top rail y=h
-    //
-    // We want the arms to cross:
-    //   Arm1: A -> D
-    //   Arm2: B -> C
-    //
-    // Symmetric positions:
-    //   A = (-s/2, 0)
-    //   B = (+s/2, 0)
-    //   C = (-s/2, h)
-    //   D = (+s/2, h)
-    //
-    // This keeps rails centered and only height changes.
-    let xA = -s/2, xB = +s/2;
-    let xC = -s/2, xD = +s/2;
+    let xA, xB, xC, xD;
 
-    // Mirrored swaps which diagonal is considered the "fixed" diagonal conceptually,
-    // but since rails are locked, the shape is the same; slider assignment differs.
-    // We'll still apply fixed/slide constraints as "pins must be at rail ends if fixed".
-    if(cons.baseL === "fixed") xA = baseLeft;
-    if(cons.baseR === "fixed") xB = baseRight;
-    if(cons.topL  === "fixed") xC = topLeft;
-    if(cons.topR  === "fixed") xD = topRight;
+    if(preset === "mirrored"){
+      // Mirrored:
+      //   baseR fixed (B), topR fixed (D)
+      //   baseL slider (A), topL slider (C)
+      //
+      // Choose:
+      //   B = baseRight (fixed)
+      //   D = topRight  (fixed)
+      // Solve sliders:
+      //   Arm1 A->D: xA = xD - s
+      //   Arm2 B->C: xC = xB - s
+      xB = baseRight;
+      xD = topRight;
 
-    // Now validate/clamp sliders to rail extents
-    // (If clamping happens, it's telling you the rail is too short for that angle.)
-    if(xA < baseLeft || xA > baseRight){
-      warnings.push("Base-left pin out of rail range; increase base length or reduce angle.");
-      xA = clamp(xA, baseLeft, baseRight);
-    }
-    if(xB < baseLeft || xB > baseRight){
-      warnings.push("Base-right pin out of rail range; increase base length or reduce angle.");
-      xB = clamp(xB, baseLeft, baseRight);
-    }
-    if(xC < topLeft || xC > topRight){
-      warnings.push("Top-left pin out of rail range; increase top length or reduce angle.");
-      xC = clamp(xC, topLeft, topRight);
-    }
-    if(xD < topLeft || xD > topRight){
-      warnings.push("Top-right pin out of rail range; increase top length or reduce angle.");
-      xD = clamp(xD, topLeft, topRight);
+      xA = xD - s;
+      xC = xB - s;
+
+      // Validate sliders stay on rails
+      outOfRange("Base-left slider (A)", xA, baseLeft, baseRight);
+      outOfRange("Top-left slider (C)", xC, topLeft, topRight);
+
+    } else {
+      // Classic + others default to Classic behavior:
+      //   baseL fixed (A), topL fixed (C)
+      //   baseR slider (B), topR slider (D)
+      //
+      // Choose:
+      //   A = baseLeft (fixed)
+      //   C = topLeft  (fixed)
+      // Solve sliders:
+      //   Arm1 A->D: xD = xA + s
+      //   Arm2 B->C: xB = xC + s
+      xA = baseLeft;
+      xC = topLeft;
+
+      xD = xA + s;
+      xB = xC + s;
+
+      // Validate sliders stay on rails
+      outOfRange("Base-right slider (B)", xB, baseLeft, baseRight);
+      outOfRange("Top-right slider (D)", xD, topLeft, topRight);
     }
 
+    // Return stage pins + rigid rail endpoints
     return {
       h, s,
-      A:{x:xA,y:0}, B:{x:xB,y:0}, C:{x:xC,y:h}, D:{x:xD,y:h},
+      A:{x:xA,y:0},
+      B:{x:xB,y:0},
+      C:{x:xC,y:h},
+      D:{x:xD,y:h},
       baseSpan: baseLen,
       topSpan: topLen,
       platform: {
-        xPlat,
-        topLeft:  {x: topLeft,  y: h},
-        topRight: {x: topRight, y: h},
-        baseLeft: {x: baseLeft, y: 0},
-        baseRight:{x: baseRight,y: 0},
+        xPlat: 0,
+        baseLeft:  {x: baseLeft,  y: 0},
+        baseRight: {x: baseRight, y: 0},
+        topLeft:   {x: topLeft,   y: h},
+        topRight:  {x: topRight,  y: h},
       },
       warnings
     };
   }
 
-  // --- If lockX is OFF, fall back to your older behavior (kept for later experimentation) ---
-  // (Still not perfect, but you can refine this later if you want drift.)
+  // --- If lockX is OFF, keep your previous experimental solver ---
+  // (You can refine later; not needed for vertical-only.)
   const baseLeftNom  = -baseLen/2;
   const baseRightNom =  baseLen/2;
   const topLeftNom   = -topLen/2;
@@ -176,10 +195,10 @@ function computeStage(Larm, baseLen, topLen, alphaDeg, preset){
     topSpan: xD - xC,
     platform: {
       xPlat: 0,
-      topLeft:  {x: topLeftNom,  y: h},
-      topRight: {x: topRightNom, y: h},
-      baseLeft: {x: baseLeftNom, y: 0},
-      baseRight:{x: baseRightNom,y: 0},
+      baseLeft:  {x: baseLeftNom,  y: 0},
+      baseRight: {x: baseRightNom, y: 0},
+      topLeft:   {x: topLeftNom,   y: h},
+      topRight:  {x: topRightNom,  y: h},
     },
     warnings
   };
