@@ -23,6 +23,13 @@ h1{ margin:0 0 6px; font-size:20px; }
 .hint{ color:var(--muted); margin:8px 0 0; font-size:12px; line-height:1.35; }
 hr{ border:0; border-top:1px solid var(--line); margin:14px 0; }
 
+.checkbox{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  color:var(--muted);
+}
+
 .btn{
   margin-top:10px;
   width:100%;

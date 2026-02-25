@@ -10,6 +10,7 @@ const state = {
   top_mm: 1200,
   alphaDeg: 25,
   preset: "classic",
+  lockX: true,       // NEW: vertical-only (rails do not translate in X)
 };
 
 function toDisplay(mm){
@@ -24,7 +25,6 @@ function fmt(val){
 function rad(deg){ return (deg * Math.PI) / 180; }
 
 function constraintsFromPreset(p){
-  // For each rail end: "fixed" (x,y fixed) or "slide" (y fixed, x variable) or "fixedWarn"
   switch(p){
     case "classic":
       return { baseL:"fixed", baseR:"slide", topL:"slide", topR:"fixed" };
@@ -39,89 +39,6 @@ function constraintsFromPreset(p){
   }
 }
 
-/**
- * Compute a single stage geometry in 2D.
- * We model endpoints on base rail (y=0) and top rail (y=h).
- *
- * Let:
- *  A = base left endpoint (xA, 0)
- *  B = base right endpoint (xB, 0)
- *  C = top left endpoint (xC, h)
- *  D = top right endpoint (xD, h)
- *
- * Arms:
- *  Arm1 connects A -> D (length Larm)
- *  Arm2 connects B -> C (length Larm)
- *
- * For a scissor with arm angle alpha relative to horizontal:
- *  Vertical rise of each arm end-to-end is h = Larm * sin(alpha)
- *  Horizontal projection is s = Larm * cos(alpha)
- *
- * Then:
- *  xD - xA = s
- *  xC - xB = s
- *
- * And rail lengths constrain:
- *  base rail length = xB - xA (nominal)
- *  top rail length  = xD - xC (nominal)
- *
- * We resolve based on constraints preset:
- *  - fixed ends keep their x pinned to rail endpoints
- *  - sliding ends adjust x within rails
- *
- * V1 approach: keep rail endpoints symmetric around center,
- * then satisfy fixed endpoints and solve the sliding ones.
- */
-function computeStage(Larm, baseLen, topLen, alphaDeg, preset){
-  const a = rad(alphaDeg);
-  const h = Larm * Math.sin(a);
-  const s = Larm * Math.cos(a);
-
-  const cons = constraintsFromPreset(preset);
-
-  // Define nominal rail endpoints (centered at 0)
-  const baseLeftNom  = -baseLen/2;
-  const baseRightNom =  baseLen/2;
-  const topLeftNom   = -topLen/2;
-  const topRightNom  =  topLen/2;
-
-  // Start with nominal positions
-  let xA = baseLeftNom, xB = baseRightNom, xC = topLeftNom, xD = topRightNom;
-
-  // Apply "fixed" constraints to lock rail endpoints
-  // Slide constraints will be solved by the arm projection equations.
-  if(cons.baseL === "fixed") xA = baseLeftNom;
-  if(cons.baseR === "fixed") xB = baseRightNom;
-  if(cons.topL  === "fixed") xC = topLeftNom;
-  if(cons.topR  === "fixed") xD = topRightNom;
-
-  // Now satisfy arm projection:
-  // xD = xA + s
-  // xC = xB + s
-  // For sliding endpoints, we allow those to move to satisfy equations.
-  if(cons.topR === "slide") xD = xA + s;
-  else if(cons.baseL === "slide") xA = xD - s;
-
-  if(cons.topL === "slide") xC = xB + s;
-  else if(cons.baseR === "slide") xB = xC - s;
-
-  // After solving, we can compute actual rail lengths implied
-  const baseSpan = xB - xA;
-  const topSpan  = xD - xC;
-
-  // Center correction: keep overall assembly centered near 0
-  // (prevents drift when both top ends slide etc.)
-  const center = (xA + xB + xC + xD) / 4;
-  xA -= center; xB -= center; xC -= center; xD -= center;
-
-  return {
-    h, s,
-    A:{x:xA,y:0}, B:{x:xB,y:0}, C:{x:xC,y:h}, D:{x:xD,y:h},
-    baseSpan, topSpan,
-    warnings: stageWarnings(cons),
-  };
-}
-
 function stageWarnings(cons){
   const warns = [];
   const baseFixed = (cons.baseL==="fixed") + (cons.baseR==="fixed");
@@ -132,14 +49,145 @@ function stageWarnings(cons){
   return warns;
 }
 
+function clamp(val, min, max){
+  return Math.max(min, Math.min(max, val));
+}
+
+/**
+ * Correct scissor stage model:
+ * - Base rail is a rigid segment of length baseLen centered at x=0 (grounded).
+ * - Top rail is a rigid segment of length topLen centered at x=0.
+ * - If lockX is ON: rails do NOT translate in X (pure vertical motion).
+ *   Pins slide within the rail extents as angle changes.
+ *
+ * Arms:
+ *  AD and BC are equal length Larm and cross (true scissor).
+ */
+function computeStage(Larm, baseLen, topLen, alphaDeg, preset){
+  const a = rad(alphaDeg);
+  const h = Larm * Math.sin(a);
+  const s = Larm * Math.cos(a);
+
+  const cons = constraintsFromPreset(preset);
+  const warnings = [...stageWarnings(cons)];
+
+  // Rail endpoints (rigid, centered in X)
+  const baseLeft  = -baseLen/2;
+  const baseRight =  baseLen/2;
+  const topLeft   = -topLen/2;
+  const topRight  =  topLen/2;
+
+  // Default platform X = 0 in lockX mode.
+  // (If you ever later want drift allowed, you can reintroduce xPlat solving.)
+  const xPlat = 0;
+
+  // --- Vertical-only mode (rails don't translate in X) ---
+  if(state.lockX){
+    // Build a "true X" scissor with symmetric slider pins.
+    // Base pins:
+    //   A and B are on base rail y=0
+    // Top pins:
+    //   C and D are on top rail y=h
+    //
+    // We want the arms to cross:
+    //   Arm1: A -> D
+    //   Arm2: B -> C
+    //
+    // Symmetric positions:
+    //   A = (-s/2, 0)
+    //   B = (+s/2, 0)
+    //   C = (-s/2, h)
+    //   D = (+s/2, h)
+    //
+    // This keeps rails centered and only height changes.
+    let xA = -s/2, xB = +s/2;
+    let xC = -s/2, xD = +s/2;
+
+    // Mirrored swaps which diagonal is considered the "fixed" diagonal conceptually,
+    // but since rails are locked, the shape is the same; slider assignment differs.
+    // We'll still apply fixed/slide constraints as "pins must be at rail ends if fixed".
+    if(cons.baseL === "fixed") xA = baseLeft;
+    if(cons.baseR === "fixed") xB = baseRight;
+    if(cons.topL  === "fixed") xC = topLeft;
+    if(cons.topR  === "fixed") xD = topRight;
+
+    // Now validate/clamp sliders to rail extents
+    // (If clamping happens, it's telling you the rail is too short for that angle.)
+    if(xA < baseLeft || xA > baseRight){
+      warnings.push("Base-left pin out of rail range; increase base length or reduce angle.");
+      xA = clamp(xA, baseLeft, baseRight);
+    }
+    if(xB < baseLeft || xB > baseRight){
+      warnings.push("Base-right pin out of rail range; increase base length or reduce angle.");
+      xB = clamp(xB, baseLeft, baseRight);
+    }
+    if(xC < topLeft || xC > topRight){
+      warnings.push("Top-left pin out of rail range; increase top length or reduce angle.");
+      xC = clamp(xC, topLeft, topRight);
+    }
+    if(xD < topLeft || xD > topRight){
+      warnings.push("Top-right pin out of rail range; increase top length or reduce angle.");
+      xD = clamp(xD, topLeft, topRight);
+    }
+
+    return {
+      h, s,
+      A:{x:xA,y:0}, B:{x:xB,y:0}, C:{x:xC,y:h}, D:{x:xD,y:h},
+      baseSpan: baseLen,
+      topSpan: topLen,
+      platform: {
+        xPlat,
+        topLeft:  {x: topLeft,  y: h},
+        topRight: {x: topRight, y: h},
+        baseLeft: {x: baseLeft, y: 0},
+        baseRight:{x: baseRight,y: 0},
+      },
+      warnings
+    };
+  }
+
+  // --- If lockX is OFF, fall back to your older behavior (kept for later experimentation) ---
+  // (Still not perfect, but you can refine this later if you want drift.)
+  const baseLeftNom  = -baseLen/2;
+  const baseRightNom =  baseLen/2;
+  const topLeftNom   = -topLen/2;
+  const topRightNom  =  topLen/2;
+
+  let xA = baseLeftNom, xB = baseRightNom, xC = topLeftNom, xD = topRightNom;
+
+  if(cons.baseL === "fixed") xA = baseLeftNom;
+  if(cons.baseR === "fixed") xB = baseRightNom;
+  if(cons.topL  === "fixed") xC = topLeftNom;
+  if(cons.topR  === "fixed") xD = topRightNom;
+
+  if(cons.topR === "slide") xD = xA + s;
+  else if(cons.baseL === "slide") xA = xD - s;
+
+  if(cons.topL === "slide") xC = xB + s;
+  else if(cons.baseR === "slide") xB = xC - s;
+
+  const center = (xA + xB + xC + xD) / 4;
+  xA -= center; xB -= center; xC -= center; xD -= center;
+
+  return {
+    h, s,
+    A:{x:xA,y:0}, B:{x:xB,y:0}, C:{x:xC,y:h}, D:{x:xD,y:h},
+    baseSpan: xB - xA,
+    topSpan: xD - xC,
+    platform: {
+      xPlat: 0,
+      topLeft:  {x: topLeftNom,  y: h},
+      topRight: {x: topRightNom, y: h},
+      baseLeft: {x: baseLeftNom, y: 0},
+      baseRight:{x: baseRightNom,y: 0},
+    },
+    warnings
+  };
+}
+
 function computeAll(){
-  const Larm = state.arm_mm;
-  const baseLen = state.base_mm;
-  const topLen = state.top_mm;
+  const stage = computeStage(state.arm_mm, state.base_mm, state.top_mm, state.alphaDeg, state.preset);
 
-  const stage = computeStage(Larm, baseLen, topLen, state.alphaDeg, state.preset);
-
-  // Stack N stages vertically: each stage adds height h
   const stages = [];
   for(let i=0;i<state.N;i++){
     const yOffset = i * stage.h;
@@ -165,13 +213,22 @@ function draw(){
 
   const { stage0, stages, totalH } = computeAll();
 
-  // View mapping
   const W = 980, H = 560;
   const margin = 70;
 
-  // Extents in mm (rough)
-  const xMin = Math.min(stage0.A.x, stage0.B.x, stage0.C.x, stage0.D.x) - 150;
-  const xMax = Math.max(stage0.A.x, stage0.B.x, stage0.C.x, stage0.D.x) + 150;
+  // Use platform endpoints for rails (rigid members)
+  const baseLeft = {x: stage0.platform.baseLeft.x, y: 0};
+  const baseRight= {x: stage0.platform.baseRight.x, y: 0};
+  const topLeft  = {x: stage0.platform.topLeft.x, y: totalH};
+  const topRight = {x: stage0.platform.topRight.x, y: totalH};
+
+  const allX = [baseLeft.x, baseRight.x, topLeft.x, topRight.x];
+  for(const st of stages){
+    allX.push(st.A.x, st.B.x, st.C.x, st.D.x);
+  }
+
+  const xMin = Math.min(...allX) - 150;
+  const xMax = Math.max(...allX) + 150;
   const yMin = -120;
   const yMax = totalH + 180;
 
@@ -182,29 +239,21 @@ function draw(){
   const tx = (x) => margin + (x - xMin) * s;
   const ty = (y) => H - margin - (y - yMin) * s;
 
-  // rails (base & top)
-  const baseLeft = {x: stage0.A.x, y: 0};
-  const baseRight= {x: stage0.B.x, y: 0};
-  const topLeft  = {x: stage0.C.x, y: totalH};
-  const topRight = {x: stage0.D.x, y: totalH};
-
+  // rails
   line(svg, tx(baseLeft.x), ty(baseLeft.y), tx(baseRight.x), ty(baseRight.y), 6, "rgba(255,255,255,.25)");
   line(svg, tx(topLeft.x),  ty(topLeft.y),  tx(topRight.x),  ty(topRight.y),  6, "rgba(255,255,255,.25)");
 
-  // draw stages
+  // stages
   for(const st of stages){
-    // Arms: A->D and B->C for each stage
     line(svg, tx(st.A.x), ty(st.A.y), tx(st.D.x), ty(st.D.y), 5, "rgba(122,162,247,.95)");
     line(svg, tx(st.B.x), ty(st.B.y), tx(st.C.x), ty(st.C.y), 5, "rgba(122,162,247,.95)");
 
-    // joints
     joint(svg, tx(st.A.x), ty(st.A.y));
     joint(svg, tx(st.B.x), ty(st.B.y));
     joint(svg, tx(st.C.x), ty(st.C.y));
     joint(svg, tx(st.D.x), ty(st.D.y));
   }
 
-  // labels
   text(svg, 20, 26, `α = ${state.alphaDeg}°  |  N = ${state.N}  |  H = ${fmt(toDisplay(totalH))} ${state.units}`, 14);
   if(stage0.warnings.length){
     text(svg, 20, 48, `⚠ ${stage0.warnings.join(" ")}`, 12, "rgba(247,118,142,.95)");
@@ -229,15 +278,15 @@ function updateOutputs(){
       baseRail: toDisplay(state.base_mm),
       topRail: toDisplay(state.top_mm),
       alphaDeg: state.alphaDeg,
-      constraints: cons
+      constraints: cons,
+      lockX: state.lockX
     },
     outputs: {
       stageHeight: toDisplay(stage0.h),
       stageSpanProjection: toDisplay(stage0.s),
       totalHeight: toDisplay(totalH),
-      pinCoords_mm: {
-        A: stage0.A, B: stage0.B, C: stage0.C, D: stage0.D
-      }
+      railEndpoints_mm: stage0.platform,
+      pinCoords_mm: { A: stage0.A, B: stage0.B, C: stage0.C, D: stage0.D }
     },
     warnings: stage0.warnings
   };
@@ -249,6 +298,7 @@ function updateOutputs(){
   base rail = ${fmt(toDisplay(state.base_mm))} ${state.units}
   top rail  = ${fmt(toDisplay(state.top_mm))} ${state.units}
   α = ${state.alphaDeg}°
+  lock X = ${state.lockX ? "ON (vertical-only)" : "OFF"}
 
 Constraints:
   base left  = ${cons.baseL}
@@ -261,6 +311,10 @@ Outputs (${state.units}):
   stage projection s = ${fmt(toDisplay(stage0.s))} ${state.units}
   total height H = ${fmt(toDisplay(totalH))} ${state.units}
 
+Rail endpoints (mm, stage 1):
+  Base: (${fmt(stage0.platform.baseLeft.x)}, 0) -> (${fmt(stage0.platform.baseRight.x)}, 0)
+  Top : (${fmt(stage0.platform.topLeft.x)}, ${fmt(stage0.platform.topLeft.y)}) -> (${fmt(stage0.platform.topRight.x)}, ${fmt(stage0.platform.topRight.y)})
+
 Pin coordinates (mm, stage 1):
   A (${fmt(stage0.A.x)}, ${fmt(stage0.A.y)})
   B (${fmt(stage0.B.x)}, ${fmt(stage0.B.y)})
@@ -268,7 +322,7 @@ Pin coordinates (mm, stage 1):
   D (${fmt(stage0.D.x)}, ${fmt(stage0.D.y)})
 
 Tip:
-  Copy JSON and paste into your CAD notes. Use the pin coords as centerpoints.
+  Copy JSON and paste into your CAD notes. Use the coords as centerpoints.
 `;
 
   el("copy").onclick = async () => {
@@ -284,23 +338,19 @@ Tip:
 
 function bind(){
   el("units").addEventListener("change", (e)=>{
-    // Convert displayed fields to new units but keep internal mm consistent
     const newUnits = e.target.value;
     if(newUnits === state.units) return;
 
-    // read current displayed values, convert to mm using OLD units
     const armDisp = Number(el("arm").value);
     const baseDisp = Number(el("base").value);
     const topDisp = Number(el("top").value);
 
-    // Convert those display numbers from old units -> mm
     const oldUnits = state.units;
-    state.units = oldUnits; // temporarily ensure toMM uses old units
+    state.units = oldUnits;
     state.arm_mm = toMM(armDisp);
     state.base_mm = toMM(baseDisp);
     state.top_mm = toMM(topDisp);
 
-    // switch units, then rewrite fields in new units
     state.units = newUnits;
     el("arm").value  = fmt(toDisplay(state.arm_mm));
     el("base").value = fmt(toDisplay(state.base_mm));
@@ -329,6 +379,11 @@ function bind(){
 
   el("preset").addEventListener("change",(e)=>{
     state.preset = e.target.value;
+    updateOutputs(); draw();
+  });
+
+  el("lockX").addEventListener("change",(e)=>{
+    state.lockX = e.target.checked;
     updateOutputs(); draw();
   });
 }
