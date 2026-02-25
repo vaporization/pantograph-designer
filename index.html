@@ -58,7 +58,12 @@
       <h3>Constraints / Grounding</h3>
 
       <div class="row">
-        <label>Preset</label>
+        <label>Lock platform X (vertical-only lift)</label>
+        <input id="lockX" type="checkbox" checked />
+      </div>
+
+      <div class="row">
+        <label>Preset (only used if Lock X is OFF)</label>
         <select id="preset">
           <option value="classic" selected>Classic scissor: Base L fixed, Base R sliding; Top L sliding, Top R fixed</option>
           <option value="mirrored">Mirrored: Base R fixed, Base L sliding; Top R sliding, Top L fixed</option>
@@ -67,16 +72,10 @@
         </select>
       </div>
 
-      <div class="row">
-        <label class="checkbox">
-          <input id="lockX" type="checkbox" checked />
-          Lock platform X (vertical-only lift)
-        </label>
-      </div>
-
       <p class="hint">
-        “Grounded” means fixed in X/Y. “Sliding” means fixed in Y but can move in X (slot).
-        With <b>Lock platform X</b> enabled, the rails stay centered and only move in Y, while pins slide in slots.
+        With <b>Lock platform X</b> enabled, the rails stay centered and only move in Y; the pins slide along the rails
+        to achieve the scissor motion while keeping the platform lengths constant.
+        Turn Lock X off to use classic fixed/slide presets.
       </p>
     </section>
 
